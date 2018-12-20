@@ -1,0 +1,286 @@
+#!/bin/bash
+
+# Unzips a custom FGTC receiving/build ODT form, puts in values extracted from an
+# HDT dump file, rezips the ODT file, converts it to PDF, and prints it.
+# Peter Scheie, Free Geek Twin Cities
+# v1    20110928    Initial attempt.
+# v2    20111005    Added call to count-ram-slots script for counting RAM slots.
+# v3    20120418    Additional filtering added to Extract() so it doesn't choke
+#                   on unprintable characters.
+
+
+
+## Set some globals
+id=$$
+LOG='/var/log/print-specs/print-specs.log'
+
+#### Utility Functions ####
+
+OK()
+{
+    echo -e "OK $1" >> $LOG
+}
+
+ERROR()
+{
+    now=$(date '+%Y-%m-%d %H:%M:%S')
+    printf "$now ERROR: $1 \n" >> $LOG
+}
+
+INFO()
+{
+    now=$(date '+%Y-%m-%d %H:%M:%S')
+    printf "$now $1\n" >> $LOG
+}
+
+HELP()
+{
+    msg="
+NAME
+    print-specs
+
+DESCRIPTION
+    Extracts values from HDT dump files, inserts them into FGTC 'Intake &
+    Build' sheet, and then prints the sheet.
+
+OPTIONS
+    -v  Verbose.  Show some feedback on the console.  Print-specs is normally
+        called via cron, so no such output is usually desired.
+
+    -p  Generate final PDF but do not send it to the printer.
+
+    -h  Help.  Print this screen.
+"
+    echo "$msg"
+    exit
+}
+
+#### Functions, Defined alphabetically
+
+ProcessDumpFiles()
+{
+    ## Build list of dump files, move them to working directory.
+    ## Usually there will be no files, sometimes one file, but if FGTC grows...
+    ## Sleep for 2 seconds to try to let files settle.
+    sleep 2
+    list=($(ls /adm/tftproot/postbuild/))
+    if [ -z "$list" ]; then
+        exit
+    else
+        workdir=$(mktemp -d)
+        mkdir -p $workdir/dumps
+        ## Move any found files right away so the next run of print-specs 
+        ## doesn't start working on our files too.
+        pattern='[0-9a-f][0-9a-f]-[0-9a-f][0-9a-f]-[0-9a-f][0-9a-f]-[0-9a-f][0-9a-f]-[0-9a-f][0-9a-f]-[0-9a-f][0-9a-f]'
+		for file in ${list[@]}; do
+            if [[ "$file" = ${pattern}* ]]; then
+                cp /adm/tftproot/postbuild/$file /adm/dc/$file-$RANDOM
+                mv /adm/tftproot/postbuild/$file $workdir/dumps/
+            fi
+        done
+        
+		for file in ${list[@]}; do
+            INFO "print-specs-post-build: $file"
+            mac=$workdir/${file:0:17}
+            mkdir $mac
+	        UncompressDump $file
+	        GetTastyBits 
+	        UnzipTemplate 
+	        InsertTastyBits
+	        RezipOdt 
+	        Odt2Pdf 
+	        PrintPdf 
+        done
+    fi
+    #CleanUp $workdir
+}
+
+UncompressDump()
+{
+    INFO "UncompressDump()"
+    cd $mac
+    gunzip <$workdir/dumps/$file |cpio -id
+}
+
+CleanUp() ## Remove files & directories created when everything is done
+{
+    INFO "CleanUp()"
+    rm -rf $1
+}
+
+Extract()
+{
+    ## Given the path/file, key string to match, return value attached to key
+    ## Used by GetTastyBits()
+    local dirfile=$1
+    local key=$2
+    # use sed & cat to strip out weird unprintable characters that cause crashes
+    grep $2 $1 |cut -d: -f2 | sed 's/[",]//g;s/(R)//g;s/(tm)//g;s/[^a-zA-Z0-9 _+\-\.]/ /g' | cat -v
+}
+
+GetDiskSize() {
+    INFO "GetDiskSize()"
+    # HDT reports disk size in precise GiB size; we want common rounded sizes
+    local diskfile=$1
+    local baredisk=$(Extract $diskfile '"disk->size"' | tr -d '\n')
+    local rawdisk=$(echo $baredisk | sed 's/ GiB//' |cut -f1 -d".")
+    if [ $rawdisk -ge 14 ] && [ $rawdisk -le 25 ]; then
+        echo "20GB"
+    elif [ $rawdisk -ge 26 ] && [ $rawdisk -le 34 ]; then
+        echo "30GB"
+    elif [ $rawdisk -ge 36 ] && [ $rawdisk -le 44 ]; then
+        echo "40GB"
+    elif [ $rawdisk -ge 55 ] && [ $rawdisk -le 64 ]; then
+        echo "60GB"
+    elif [ $rawdisk -ge 72 ] && [ $rawdisk -le 84 ]; then
+        echo "80GB"
+    elif [ $rawdisk -ge 85 ] && [ $rawdisk -le 109 ]; then
+        echo "100GB"
+    elif [ $rawdisk -ge 110 ] && [ $rawdisk -le 128 ]; then
+        echo "120GB"
+    elif [ $rawdisk -ge 140 ] && [ $rawdisk -le 170 ]; then
+        echo "160GB"
+    elif [ $rawdisk -ge 180 ] && [ $rawdisk -le 210 ]; then
+        echo "200GB"
+    elif [ $rawdisk -ge 220 ] && [ $rawdisk -le 260 ]; then
+        echo "250GB"
+    elif [ $rawdisk -ge 261 ] && [ $rawdisk -le 302 ]; then
+        echo "300GB"
+    elif [ $rawdisk -ge 303 ] && [ $rawdisk -le 325 ]; then
+        echo "320GB"
+    elif [ $rawdisk -ge 370 ] && [ $rawdisk -le 410 ]; then
+        echo "400GB"
+    elif [ $rawdisk -ge 420 ] && [ $rawdisk -le 560 ]; then
+        echo "500GB"
+    elif [ $rawdisk -ge 561 ] && [ $rawdisk -le 650 ]; then
+        echo "640GB"
+    elif [ $rawdisk -ge 651 ] && [ $rawdisk -le 780 ]; then
+        echo "750GB"
+    elif [ $rawdisk -ge 800 ] && [ $rawdisk -le 1100 ]; then
+        echo "1TB"
+    elif [ $rawdisk -ge 1200 ] && [ $rawdisk -le 1599 ]; then
+        echo "1.5TB"
+    elif [ $rawdisk -ge 1600 ] && [ $rawdisk -le 2100 ]; then
+        echo "2TB"
+    elif [ $rawdisk -ge 2500 ] && [ $rawdisk -le 3200 ]; then
+        echo "3TB"
+    else
+        echo "$baredisk"
+    fi
+}
+
+GetDiskInterface() {
+    INFO "GetDiskInterface()"
+    local diskfile=$1
+    local inf=$(Extract $diskfile '"disk->interface_type"' | sed 's/^[ \t]*//;s/[ \t]*$//')
+    case $inf in
+        SATA) hdinfs='_X_' ;;
+        # *) hdinfp='_X_' ;;
+    esac
+    echo "${hdinfp:-___} ${hdinfs:-___}"
+}
+
+GetTastyBits() # pick out desired key-value pairs from dump contents
+{
+    INFO "GetTastyBits()"
+    MFR=$(Extract $mac/dmi '"dmi.system.manufacturer"')
+    MODEL=$(Extract $mac/dmi '"dmi.system.product_name"')
+    CPU=$(Extract $mac/cpu '"cpu.model"')
+    CORES=$(Extract $mac/cpu '"cpu.num_cores"')
+    CACHE=$(Extract $mac/dmi '"dmi.cache.installed_size ' | tr -d '\n')
+    FSBSPD=$(Extract $mac/dmi '"dmi.processor.external_clock"')
+    RSQ=$(/adm/tftproot/scripts/count-ram-slots.py $mac/dmi)   # Ram Socket Qty
+    RSTYPE=$(grep -m 1 '"dmi.memory.type"' $mac/dmi |cut -d: -f2 | sed 's/[",]//g;s/(R)//g;s/(tm)//g')
+    RSSPD=$(grep -m 1 '"dmi.memory.speed"' $mac/dmi|cut -d: -f2 | sed 's/[",]//g;s/(R)//g;s/(tm)//g;s/^[ \t]*//;s/[ \t]*$//')
+    MEM=$(/adm/tftproot/scripts/get-ram-size.py $mac/memory)
+    RSUSED=$(/adm/tftproot/scripts/ram-slots-used.py $mac/dmi)
+    VRAM=$(($(Extract $mac/vesa '"vesa.memory"' | sed 's/ KB//') / 1024 ))
+    VMFR=$(Extract $mac/vesa '"vesa.vendor"')
+    VCHIP=$(Extract $mac/vesa '"vesa.product"')
+    HDSZ=$(GetDiskSize $mac/disks)
+    HDINF=($(GetDiskInterface $mac/disks))
+    CACHE=$(echo $CACHE | sed 's/\([0-9]\) \([0-9]\)/\1, \2/g')
+    MACADDR=$(echo $mac |cut -f4 -d'/')
+#    case "$RSTYPE" in
+#        DDR ) ;;
+#        DDR2 ) ;;
+#        DDR3 ) ;;
+#        RAMBUS ) ;;
+#        * ) RSTYPE='  <\/text:p><text:p text:style-name="P2">__DDR<\/text:p><text:p text:style-name="P2">__DDR2<\/text:p><text:p text:style-name="P2">__DDR3<\/text:p><text:p text:style-name="P2">RAMBUS<\/text:p>' ;;
+#    esac
+}
+
+InsertTastyBits() # replace markers in content.xml with value extracted from dump file
+{
+    INFO "InsertTastyBits()"
+    DATE=$(date "+%b %d, %Y")
+    sed "
+        s/DATE/${DATE:- }/; 
+        s/MFR/${MFR:- }/;
+        s/MODEL/${MODEL:- }/;
+        s/CPU/${CPU:- }/;
+        s/CORES/${CORES:- }/;
+        s/FSBSPD/${FSBSPD:- }/;
+        s/RSQ/${RSQ:- }/;
+        s/RSUSED/${RSUSED:-___}/;
+        s/RSTYPE/${RSTYPE:- }/;
+        s/RSSPD/${RSSPD:- }/;
+        s/CACHE/${CACHE:- }/;
+        s/HDSZ/${HDSZ:- }/;
+        s/HDINFP/${HDINF[0]}/;
+        s/HDINFS/${HDINF[1]}/;
+        s/MEM/${MEM:- }/;
+        s/VRAM/${VRAM:- }/;
+        s/VMFR/${VMFR:- }/;
+        s/VCHIP/${VCHIP:- }/;
+        s/MACADDR/${MACADDR:- }/;
+    " $mac/template/content.xml >$mac/output
+
+    mv $mac/output $mac/template/content.xml
+}
+
+Odt2Pdf() # Convert ODT file to PDF
+{
+    INFO "Odt2Pdf()"
+    unoconv -v -f pdf $mac/sheet.odt
+}
+
+PrintPdf() 
+{
+    INFO "PrintPdf()"
+    if [ -z $noprint ]; then
+        cd $mac
+        lpr -P intake sheet.pdf
+    fi
+}
+
+RezipOdt() # Rezip modified ODT subfiles back into ODT
+{
+    INFO "RezipOdt()"
+    cd $mac/template
+    zip -q -0 -X ../sheet.odt mimetype
+    zip -q -r ../sheet.odt * -x mimetype
+}
+
+UnzipTemplate() # Unzip ODT template
+{
+    INFO "UnzipTemplate()"
+    # should make name & location of form alternatively settable at command line
+    templatefile=/adm/tftproot/hdt/fg-refurb-sheet-tagged.odt
+    mkdir -p $mac/template
+    unzip -qq -d $mac/template/ $templatefile
+}
+
+#### End of functions ####
+
+## Handle command line arguments ##
+while getopts ":vp" opt; do
+    case $opt in
+        v) LOG='| tee -a /var/log/print-specs/post-build-specs.log' ;;
+        p) noprint=1 ;;
+        *) HELP ;;
+    esac
+done
+
+### Do the work ###
+ProcessDumpFiles
